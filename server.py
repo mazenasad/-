@@ -1,26 +1,22 @@
-import os
-from flask import Flask, request, jsonify
 
-app = Flask(__name__)
+services:
+  - type: web
+    name: dark-terminal-server
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: dark-terminal-db
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: 3.12.8
 
-online_operators = {}
-
-@app.route('/')
-def index():
-    return "TDT CLOUD SERVER IS RUNNING"
-
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.json or {}
-    op_id = data.get("operator_id", "UNKNOWN")
-    online_operators[op_id] = {"ip": request.remote_addr, "status": "ONLINE"}
-    return jsonify({"status": "SUCCESS", "operators": online_operators})
-
-@app.route('/operators', methods=['GET'])
-def get_operators():
-    return jsonify(online_operators)
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-  
+databases:
+  - name: dark-terminal-db
+    plan: basic-256mb
+    databaseName: darkterminal
+    user: darkterminal
